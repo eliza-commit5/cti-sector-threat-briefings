@@ -2,7 +2,7 @@
 
 > **TLP:CLEAR.** Detections compiled from primary reporting. Validate every indicator and rule against your own telemetry before operational use.
 
-Maintained by **"Eliza / eliza-commit5"
+Maintained by "Eliza / eliza-commit5"
 
 Russian GRU Unit 74455 — tracked by Mandiant as **APT44**, and historically as Voodoo Bear / Telebots / Sandworm. The only confirmed actor with a track record of **destructive ICS attacks causing physical impact** (2015/2016 Ukraine grid outages, 2022 Industroyer2, 2024 FrostyGoop). Pairs OT-specific effects with Windows wipers and frequently operates through compromised network edge devices.
 
