@@ -1,0 +1,80 @@
+// =============================================================================
+// CyberAv3ngers (IRGC-CEC) — Microsoft Defender XDR / Sentinel KQL
+// Covers: Unitronics PLC initial access + IOCONTROL (OrpaCrab) C2
+// Sources: CISA AA23-335A; Claroty Team82 IOCONTROL report
+//
+// IMPORTANT SCOPING NOTE:
+//   CyberAv3ngers targets Linux-based OT/IoT (PLCs, HMIs, fuel terminals),
+//   which typically do NOT run MDE endpoint agents. These queries are most
+//   effective when you ingest NETWORK telemetry — Microsoft Defender for IoT
+//   (DeviceNetworkEvents from network sensors) and/or firewall logs into
+//   Sentinel. On a pure-endpoint MDE tenant, coverage will be partial.
+//
+//   Atomic C2 indicators date to 2023-2024 and are likely dead/sinkholed:
+//   use queries 2 for RETRO-HUNT; queries 1, 3, 4 are durable behaviors.
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// 1. INITIAL ACCESS — traffic to/from Unitronics PCOM port (TCP/20256)
+//    These PLCs should never be internet-reachable (CISA AA23-335A).
+// -----------------------------------------------------------------------------
+DeviceNetworkEvents
+| where Timestamp > ago(30d)
+| where RemotePort in (20256, 20257) or LocalPort in (20256, 20257)
+| where RemoteIPType == "Public"
+| project Timestamp, DeviceName, ActionType, LocalIP, LocalPort,
+          RemoteIP, RemotePort, InitiatingProcessFileName
+| summarize Count = count(), FirstSeen = min(Timestamp), LastSeen = max(Timestamp),
+          RemoteIPs = make_set(RemoteIP, 50) by DeviceName, LocalIP
+| sort by Count desc
+
+
+// -----------------------------------------------------------------------------
+// 2. IOCONTROL C2 — known atomic indicators (RETRO-HUNT)
+//    Domain: tylarion867mino[.]com   IP: 159.100.6.69
+// -----------------------------------------------------------------------------
+let c2_domains = dynamic(["tylarion867mino.com", "uuokhhfsdlk.tylarion867mino.com"]);
+let c2_ips     = dynamic(["159.100.6.69"]);
+DeviceNetworkEvents
+| where Timestamp > ago(180d)
+| where RemoteIP in (c2_ips)
+     or RemoteUrl has_any (c2_domains)
+     or tostring(AdditionalFields) has "tylarion867mino"
+| project Timestamp, DeviceName, ActionType, RemoteIP, RemoteUrl, RemotePort,
+          InitiatingProcessFileName, InitiatingProcessCommandLine
+| sort by Timestamp desc
+
+
+// -----------------------------------------------------------------------------
+// 3. C2 CHANNEL — MQTT to an external broker (BEHAVIORAL)
+//    IOCONTROL hides C2 inside MQTT (TCP/1883 cleartext, 8883 TLS).
+//    Flag OT/embedded devices reaching a PUBLIC MQTT broker. Allow-list any
+//    sanctioned broker IPs in 'approved_brokers'.
+// -----------------------------------------------------------------------------
+let approved_brokers = dynamic([]);  // add legitimate broker IPs here
+DeviceNetworkEvents
+| where Timestamp > ago(30d)
+| where RemotePort in (1883, 8883)
+| where RemoteIPType == "Public"
+| where RemoteIP !in (approved_brokers)
+| summarize Count = count(), FirstSeen = min(Timestamp), LastSeen = max(Timestamp),
+          Brokers = make_set(RemoteIP, 50) by DeviceName, LocalIP, InitiatingProcessFileName
+| sort by Count desc
+
+
+// -----------------------------------------------------------------------------
+// 4. DEFENSE EVASION — DNS-over-HTTPS from hosts that should not use it (HUNT)
+//    IOCONTROL resolves C2 via DoH (Cloudflare 1.1.1.1) to avoid plaintext DNS.
+//    DoH is legitimate on user endpoints; scope to servers / OT gateways.
+//    Replace the device filter with your own asset tagging.
+// -----------------------------------------------------------------------------
+let doh_resolvers = dynamic(["1.1.1.1","1.0.0.1","8.8.8.8","8.8.4.4","9.9.9.9"]);
+DeviceNetworkEvents
+| where Timestamp > ago(30d)
+| where RemoteIP in (doh_resolvers)
+| where (RemoteUrl has "dns-query") or (RemotePort == 443 and isnotempty(RemoteUrl) and RemoteUrl has "dns")
+// | where DeviceName has_any ("ot-", "scada", "hmi", "gw-")   // <- scope to non-user hosts
+| summarize Count = count(), FirstSeen = min(Timestamp), LastSeen = max(Timestamp),
+          Resolvers = make_set(RemoteIP, 10) by DeviceName, InitiatingProcessFileName
+| sort by Count desc
