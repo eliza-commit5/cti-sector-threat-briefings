@@ -17,7 +17,7 @@ Maintained by **Eliza / eliza-commit5**. Contributions, corrections, and source 
 
 ## Contents
 
-- [Reports](#reports)
+- [Reports](#Reports)
 - [Executive summary](#executive-summary)
 - [1. Energy / ICS-OT](#1-energy--ics-ot)
 - [2. ISP / Telecom](#2-isp--telecom)
