@@ -1,0 +1,99 @@
+```
+==============================================================================
+ Sandworm (GRU Unit 74455 / APT44) — Splunk SPL detections
+ Focus: destructive OT/ICS toolset
+   - FrostyGoop / BUSTLEBERM  (Modbus TCP, TCP/502)   — Dragos / Unit 42
+   - Industroyer2             (IEC 60870-5-104, TCP/2404) — ESET / CERT-UA
+   - Initial access tradecraft (edge router compromise, L2TP into OT)
+ Author: "Eliza / eliza-commit5"
+ Sources: Dragos FrostyGoop intel brief; Unit 42 FrostyGoop analysis;
+          ESET Industroyer2; CERT-UA.
+ NOTE: OT-protocol visibility (Zeek/NDR, Dragos, Nozomi, Defender for IoT)
+       is required for searches 1-3. Adjust index/sourcetype/fields to match.
+==============================================================================
+```
+
+```
+------------------------------------------------------------------------------
+ 1. FROSTYGOOP — unauthorized Modbus WRITE/diagnostic commands (BEHAVIORAL)
+    FrostyGoop sends Modbus commands to read/modify ICS registers. The
+    Lviv attack downgraded ENCO firmware then forced bad readings.
+    Watch for write/diagnostic function codes from hosts that are NOT the
+    sanctioned HMI/SCADA master. Requires a Modbus-aware sensor (e.g. Zeek
+    modbus.log). Function codes: 5/6/15/16 = writes, 8 = diagnostics,
+    43 = read device ID (firmware enumeration).
+------------------------------------------------------------------------------
+```
+index=ot sourcetype=zeek_modbus OR sourcetype=modbus
+  (func IN (5,6,8,15,16,43) OR function IN ("WRITE_SINGLE_COIL","WRITE_SINGLE_REGISTER","WRITE_MULTIPLE_REGISTERS","DIAGNOSTICS"))
+| search NOT [ | inputlookup approved_modbus_masters.csv | fields src_ip ]
+| stats count min(_time) as first_seen max(_time) as last_seen
+        values(func) as func_codes values(dest_ip) as plc_targets by src_ip
+| convert ctime(first_seen) ctime(last_seen)
+| sort - count
+
+```
+------------------------------------------------------------------------------
+ 2. INTERNET-EXPOSED / EXTERNAL Modbus TCP (TCP/502)  (BEHAVIORAL)
+    FrostyGoop can be operated externally against internet-reachable Modbus.
+    Any Modbus crossing the OT perimeter to/from a public IP is the signal.
+------------------------------------------------------------------------------
+```
+index=network OR index=firewall dest_port=502
+| where NOT cidrmatch("10.0.0.0/8", src_ip)
+    AND NOT cidrmatch("172.16.0.0/12", src_ip)
+    AND NOT cidrmatch("192.168.0.0/16", src_ip)
+| stats count min(_time) as first_seen max(_time) as last_seen
+        values(dest_ip) as modbus_devices by src_ip
+| convert ctime(first_seen) ctime(last_seen)
+
+```
+------------------------------------------------------------------------------
+ 3. INDUSTROYER2 — IEC 60870-5-104 traffic from unexpected hosts (TCP/2404)
+    Industroyer2 speaks IEC-104 to RTUs to trip breakers. Flag IEC-104 from
+    any host that is not the sanctioned SCADA front-end.
+------------------------------------------------------------------------------
+```
+index=network OR index=firewall OR index=ot dest_port=2404
+| search NOT [ | inputlookup approved_scada_masters.csv | fields src_ip ]
+| stats count min(_time) as first_seen max(_time) as last_seen
+        values(dest_ip) as rtu_targets by src_ip
+| convert ctime(first_seen) ctime(last_seen)
+
+```
+------------------------------------------------------------------------------
+ 4. INITIAL ACCESS — L2TP / unexpected tunnels into the OT network (HUNT)
+    In the Lviv intrusion, actors reached OT via L2TP connections (reportedly
+    from Moscow) after compromising a MikroTik edge router. Flag L2TP (UDP/1701)
+    or new tunnels terminating in or routing toward OT ranges.
+------------------------------------------------------------------------------
+```
+index=network OR index=firewall (dest_port=1701 OR protocol="l2tp" OR app="l2tp")
+| where NOT cidrmatch("10.0.0.0/8", src_ip)
+    AND NOT cidrmatch("172.16.0.0/12", src_ip)
+    AND NOT cidrmatch("192.168.0.0/16", src_ip)
+| stats count min(_time) as first_seen max(_time) as last_seen
+        values(dest_ip) as tunnel_endpoints by src_ip
+| convert ctime(first_seen) ctime(last_seen)
+
+```
+------------------------------------------------------------------------------
+ 5. FROSTYGOOP — known file hashes (RETRO-HUNT)  <-- ADD VERIFIED HASHES
+    Paste SHA-256 values from the Dragos / Unit 42 IOC appendices into the
+    lookup 'sandworm_frostygoop_hashes.csv' (column: file_hash), then run:
+------------------------------------------------------------------------------
+```
+index=endpoint (sourcetype=sysmon OR source="*Sysmon*") EventCode=1
+| eval file_hash=lower(coalesce(SHA256, Hashes))
+| search [ | inputlookup sandworm_frostygoop_hashes.csv | eval file_hash=lower(file_hash) | fields file_hash ]
+| table _time host User Image CommandLine file_hash
+
+```
+ NOTES
+ - Searches 1-3 are durable behaviors and survive IOC churn; 5 is point-in-time.
+ - Replace lookups (approved_modbus_masters.csv, approved_scada_masters.csv,
+   sandworm_frostygoop_hashes.csv) with your environment's data.
+ - Modbus/IEC-104 parsing needs an OT-aware sensor; raw firewall logs give you
+   only port-level visibility (searches 2 and the port side of 1/3).
+==============================================================================
+```
