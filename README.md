@@ -35,7 +35,6 @@ Maintained by **Eliza / eliza-commit5**. Contributions, corrections, and source 
 
 The full briefing is available as downloadable documents:
 
-- [Full briefing (PDF)](reports/CTI_Sector_Threat_Briefing.pdf) — renders inline in the GitHub viewer
 - [Full briefing (Word / .docx)](reports/CTI_Sector_Threat_Briefing.docx)
 
 The sections below reproduce the briefing content so you can read it without leaving the page.
