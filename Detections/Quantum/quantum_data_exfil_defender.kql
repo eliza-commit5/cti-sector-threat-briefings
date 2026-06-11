@@ -1,0 +1,81 @@
+// =============================================================================
+// Quantum vertical — Data Exfiltration & Harvest-Now-Decrypt-Later (HNDL) — KQL
+// Covers BOTH quantum threat models:
+//   (A) IP THEFT of quantum R&D — mass access, archive staging, cloud/USB exfil
+//   (B) HNDL "harvest" — bulk encrypted egress (exposure inventory via network logs)
+// Author: Eliza / eliza-commit5
+// Sources: NIST FIPS 203/204/205, IR 8547; NSA CNSA 2.0.
+// Behavioral / actor-agnostic. Tune all thresholds to your baseline.
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// A1. MASS SENSITIVE-FILE ACCESS by one account in a short window (STAGING)
+//     Scope FolderPath to your R&D / quantum repositories.
+// -----------------------------------------------------------------------------
+DeviceFileEvents
+| where Timestamp > ago(7d)
+| where ActionType in ("FileAccessed","FileModified","FileCopied")
+| where FolderPath has_any (@"\Research\", @"\R&D\", "quantum")
+| summarize FilesTouched = dcount(FileName), Sample = make_set(FileName, 25)
+        by InitiatingProcessAccountName, DeviceName, bin(Timestamp, 1h)
+| where FilesTouched > 200
+| sort by FilesTouched desc
+
+
+// -----------------------------------------------------------------------------
+// A2. ENCRYPTED ARCHIVE CREATION before exfil (STAGING)
+// -----------------------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(30d)
+| where (FileName in~ ("rar.exe","winrar.exe","7z.exe","7za.exe")
+         and ProcessCommandLine has_any ("-p", "-hp", " a "))
+     or ProcessCommandLine has "Compress-Archive"
+| project Timestamp, DeviceName, AccountName, FileName, ProcessCommandLine
+| sort by Timestamp desc
+
+
+// -----------------------------------------------------------------------------
+// A3. EXFIL CHANNELS — personal cloud upload / large transfers (EXFIL)
+// -----------------------------------------------------------------------------
+DeviceNetworkEvents
+| where Timestamp > ago(30d)
+| where RemoteUrl has_any ("mega.nz","dropbox.com","drive.google.com","wetransfer","anonfiles","pcloud")
+| summarize Events = count(), Bytes = sum(tolong(coalesce(column_ifexists("SentBytes", 0), 0)))
+        by DeviceName, InitiatingProcessAccountName, RemoteUrl
+| sort by Events desc
+// Companion — USB write activity:
+//   DeviceEvents | where ActionType in ("UsbDriveMounted","PnpDeviceConnected")
+
+
+// -----------------------------------------------------------------------------
+// B1. BULK EGRESS to rare external destination (HNDL HARVEST) — Sentinel
+//     Large sustained outbound to new/rare external peers. Use network/firewall
+//     logs in Sentinel (CommonSecurityLog) or VM flow logs.
+// -----------------------------------------------------------------------------
+CommonSecurityLog
+| where TimeGenerated > ago(7d)
+| where DestinationPort in (443, 22)
+| where DestinationIP !startswith "10." and DestinationIP !startswith "192.168." and DestinationIP !startswith "172."
+| summarize BytesOut = sum(tolong(SentBytes)), Sessions = count(),
+            FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated)
+        by SourceIP, DestinationIP
+| where BytesOut > 1073741824   // >1 GB to a single external peer
+| sort by BytesOut desc
+
+
+// -----------------------------------------------------------------------------
+// B2. QUANTUM-VULNERABLE CRYPTOGRAPHY exposure inventory (HNDL EXPOSURE)
+//     NOT an attack — an exposure hunt. If you ingest TLS/SSH metadata
+//     (Zeek via Sentinel, or a network sensor), flag sessions negotiating
+//     quantum-breakable key exchange/signatures and NOT a PQC/hybrid KEM.
+//     Adjust the table/field names to your TLS-log source.
+// -----------------------------------------------------------------------------
+// Example against a custom Zeek SSL table 'Zeek_SSL_CL':
+//   Zeek_SSL_CL
+//   | where cipher matches regex @"(?i)(RSA|ECDHE|ECDH|_DHE_|_DH_|ECDSA|DSA)"
+//   | where not(cipher has_any ("MLKEM","ML-KEM","Kyber","X25519MLKEM768"))  // exclude PQC/hybrid
+//   | summarize Sessions = count(), Servers = dcount(server_name) by client_ip, cipher
+//   | sort by Sessions desc
+// Any session not negotiating a PQC/hybrid KEM is harvestable today; treat the
+// output as a crypto-migration backlog (see quantum_crypto_posture.md).
