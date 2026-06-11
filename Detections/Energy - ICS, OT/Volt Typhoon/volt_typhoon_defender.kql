@@ -1,0 +1,106 @@
+// =============================================================================
+// Volt Typhoon (VOLTZITE / Vanguard Panda / BRONZE SILHOUETTE) — Defender XDR / Sentinel KQL
+// PRC pre-positioning in US critical infrastructure. Tradecraft = LIVING OFF THE
+// LAND: built-in Windows tools, valid accounts, edge/SOHO-router proxying.
+// Author: Eliza / eliza-commit5
+// Sources: CISA AA24-038A & AA23-144A; Microsoft Volt Typhoon LOTL blog
+//          (queries 1-2 adapted from Microsoft's published hunting guidance).
+//
+// *** READ FIRST: these commands are also legitimate administration. Treat as
+// HUNT queries; the signal is argument combinations + context + clustering.
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// 1. NETSH PORTPROXY — LOTL internal proxy (HIGH-VALUE)
+//    (a) the netsh/wmic portproxy command, (b) the resulting registry key.
+// -----------------------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(30d)
+| where ProcessCommandLine has_all ("portproxy", "v4tov4")
+     or ProcessCommandLine has_all ("netsh", "portproxy", "wmic", "process call create")
+| project Timestamp, DeviceName, AccountName, FileName, ProcessCommandLine, InitiatingProcessFileName
+| sort by Timestamp desc
+// Companion — the durable registry artifact:
+//   DeviceRegistryEvents
+//   | where RegistryKey has @"\Services\PortProxy\v4tov4\tcp"
+//   | project Timestamp, DeviceName, ActionType, RegistryKey, RegistryValueName, RegistryValueData
+
+
+// -----------------------------------------------------------------------------
+// 2. NTDS.dit THEFT — ntdsutil install-media creation (HIGH-VALUE)
+//    (Microsoft's published Volt Typhoon query.)
+// -----------------------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(30d)
+| where ProcessCommandLine has_all ("ntdsutil", "create full", "pro")
+     or ProcessCommandLine has_all ("ntdsutil", "ac i ntds")
+     or ProcessCommandLine has_all ("ntdsutil", "ifm")
+| project Timestamp, DeviceName, AccountName, ProcessCommandLine, InitiatingProcessFileName
+| sort by Timestamp desc
+
+
+// -----------------------------------------------------------------------------
+// 3. LSASS CREDENTIAL DUMP via comsvcs.dll MiniDump (HIGH-VALUE)
+// -----------------------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(30d)
+| where ProcessCommandLine has "comsvcs" and ProcessCommandLine has "MiniDump"
+| project Timestamp, DeviceName, AccountName, FileName, ProcessCommandLine, InitiatingProcessFileName
+| sort by Timestamp desc
+
+
+// -----------------------------------------------------------------------------
+// 4. PowerShell SECURITY-LOG LOGON ENUMERATION (BEHAVIORAL)
+//    Querying the Security log for 4624 successful logons to map valid accounts.
+// -----------------------------------------------------------------------------
+DeviceProcessEvents
+| where Timestamp > ago(30d)
+| where FileName in~ ("powershell.exe","pwsh.exe")
+| where (ProcessCommandLine has "Get-EventLog" and ProcessCommandLine has "security")
+     or (ProcessCommandLine has "Get-WinEvent" and ProcessCommandLine has "4624")
+     or ProcessCommandLine has "InstanceId 4624"
+| project Timestamp, DeviceName, AccountName, ProcessCommandLine
+| sort by Timestamp desc
+
+
+// -----------------------------------------------------------------------------
+// 5. DISCOVERY BURST — many native recon tools on one host quickly (BEHAVIORAL)
+//    Any one is benign; a cluster from one account in 30 min is the signal.
+// -----------------------------------------------------------------------------
+let recon = dynamic(["net.exe","net1.exe","ipconfig.exe","systeminfo.exe","tasklist.exe",
+                     "netstat.exe","nltest.exe","query.exe","quser.exe","whoami.exe"]);
+DeviceProcessEvents
+| where Timestamp > ago(30d)
+| where FileName in~ (recon) or (FileName =~ "wmic.exe" and ProcessCommandLine has "logicaldisk")
+| summarize DistinctTools = dcount(FileName), Tools = make_set(FileName, 20),
+            Cmds = make_list(ProcessCommandLine, 40)
+        by DeviceName, AccountName, bin(Timestamp, 30m)
+| where DistinctTools >= 4
+| sort by DistinctTools desc
+
+
+// -----------------------------------------------------------------------------
+// 6. CUSTOM FRP / Impacket C2 — known hashes (RETRO-HUNT)  <-- ADD HASHES
+//    Paste Microsoft/CISA-published SHA-256 values for custom FRP builds.
+// -----------------------------------------------------------------------------
+let volt_hashes = dynamic([ /* "PASTE_SHA256_FROM_MICROSOFT_OR_CISA" */ ]);
+union DeviceProcessEvents, DeviceFileEvents, DeviceImageLoadEvents
+| where Timestamp > ago(180d)
+| where SHA256 in (volt_hashes)
+| project Timestamp, DeviceName, FileName, FolderPath, SHA256, InitiatingProcessCommandLine
+| sort by Timestamp desc
+
+
+// -----------------------------------------------------------------------------
+// 7. SIGN-IN ANOMALY — valid account from an unusual IP (Sentinel / Entra)
+//    Volt Typhoon logs in with stolen creds via SOHO/edge proxies (KV-botnet).
+//    Correlate rare source IPs/ASNs against the accounts seen in 1-5.
+// -----------------------------------------------------------------------------
+SigninLogs
+| where TimeGenerated > ago(30d)
+| where ResultType == 0
+| summarize Logons = count(), Cities = make_set(LocationDetails.city, 10),
+            IPs = make_set(IPAddress, 20) by UserPrincipalName, AppDisplayName
+| where array_length(IPs) > 1
+// join/scope to suspicious accounts from the host-based queries above
