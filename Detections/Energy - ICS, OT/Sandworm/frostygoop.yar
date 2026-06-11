@@ -48,7 +48,7 @@ rule frostygoop_known_hashes
 {
     meta:
         description = "FrostyGoop/BUSTLEBERM — exact known sample hashes. ADD VERIFIED SHA-256 VALUES from the Dragos / Unit 42 IOC appendices before relying on this rule."
-        author      = "[Your Name / Handle]"     /* <-- ADD YOUR NAME HERE (4 of 6) */
+        author      = "Eliza / eliza-commit5"
         date        = "2026-06-11"
         reference   = "https://hub.dragos.com/report/frostygoop-ics-malware-impacting-operational-technology"
         actor       = "Sandworm (GRU Unit 74455 / APT44)"
