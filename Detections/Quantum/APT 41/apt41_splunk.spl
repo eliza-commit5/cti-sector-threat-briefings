@@ -1,0 +1,104 @@
+```
+==============================================================================
+ APT41 / Wicked Panda / Brass Typhoon / Earth Baku — Splunk SPL
+ China-nexus dual espionage+crime actor. Primary QUANTUM-vertical relevance:
+ IP theft against high-tech / R&D organizations (incl. quantum researchers),
+ frequently via DLL side-loading, signed-binary abuse, and supply chain.
+ Author: Eliza / eliza-commit5
+ Sources: Google/Mandiant ("APT41 Has Arisen From the DUST"); Cisco Talos
+          (ShadowPad vs. Taiwanese research institute); Tinexta (KEYPLUG);
+          MITRE G0096. Adjust index/sourcetype/fields to your environment.
+ NOTE: APT41 leans on packed/in-memory/side-loaded payloads, so the behavioral
+ searches below are higher-value than file IOCs. Baseline before alerting.
+==============================================================================
+```
+
+```
+------------------------------------------------------------------------------
+ 1. DLL SIDE-LOADING from a signed binary in a non-standard path (HIGH-VALUE)
+    DUSTTRAP/ShadowPad abuse legit signed EXEs (e.g. AhnLab uninstaller, an
+    outdated MS Office IME binary) to side-load a malicious DLL from the same
+    user-writable directory. Flag signed processes loading DLLs from ProgramData/
+    Temp/AppData/Public rather than System32.
+------------------------------------------------------------------------------
+```
+index=endpoint (sourcetype=sysmon OR source="*Sysmon*") EventCode=7
+  ( ImageLoaded="*\\ProgramData\\*" OR ImageLoaded="*\\Users\\Public\\*"
+    OR ImageLoaded="*\\AppData\\*" OR ImageLoaded="*\\Windows\\Temp\\*" )
+  Signed=true
+| where NOT match(Image, "(?i)\\\\Windows\\\\(System32|SysWOW64)\\\\")
+| stats count values(ImageLoaded) as loaded_dlls min(_time) as first_seen max(_time) as last_seen
+        by host Image Signature
+| convert ctime(first_seen) ctime(last_seen)
+| sort - count
+
+```
+------------------------------------------------------------------------------
+ 2. MASQUERADED PROCESS — DUSTPAN named like a system binary (HIGH-VALUE)
+    DUSTPAN runs as w3wp.exe / conn.exe to blend in. Flag those names running
+    from the WRONG path (legit w3wp.exe lives in \System32\inetsrv\).
+------------------------------------------------------------------------------
+```
+index=endpoint (sourcetype=sysmon OR source="*Sysmon*") EventCode=1
+  ( (Image="*\\w3wp.exe" AND NOT Image="*\\System32\\inetsrv\\w3wp.exe")
+    OR Image="*\\conn.exe" )
+| table _time host User Image OriginalFileName CommandLine ParentImage
+| sort - _time
+
+```
+------------------------------------------------------------------------------
+ 3. CERTUTIL DOWNLOAD / DECODE + free-hosting delivery (BEHAVIORAL)
+    APT41 web shells call certutil to fetch DUSTPAN; payloads are staged on
+    free hosting (Cloudflare Workers, InfinityFree, TryCloudflare).
+------------------------------------------------------------------------------
+```
+index=endpoint (sourcetype=sysmon OR source="*Sysmon*") EventCode=1
+  Image="*\\certutil.exe"
+  (CommandLine="*urlcache*" OR CommandLine="*-f *" OR CommandLine="*decode*" OR CommandLine="*split*")
+| table _time host User ParentImage CommandLine
+| sort - _time
+``` (companion — network egress to free-hosting C2 staging) ```
+| eval suspicious_host=if(match(url,"(?i)(workers\.dev|infinityfree|trycloudflare\.com|pages\.dev)"),1,0)
+
+```
+------------------------------------------------------------------------------
+ 4. CLOUD-SERVICE C2 — TOUGHPROGRESS abuses Google Calendar (HUNT)
+    Flag non-browser, non-sync processes talking to Google API endpoints.
+------------------------------------------------------------------------------
+```
+index=network OR index=proxy (url="*calendar.google.com*" OR url="*www.googleapis.com/calendar*")
+| search NOT (process IN ("chrome.exe","msedge.exe","firefox.exe","outlook.exe") OR user_agent="*Mozilla*")
+| stats count values(process) as procs min(_time) as first_seen max(_time) as last_seen by host src_ip
+| convert ctime(first_seen) ctime(last_seen)
+
+```
+------------------------------------------------------------------------------
+ 5. WEB SHELL — IIS/Exchange worker spawning a shell (BEHAVIORAL)
+------------------------------------------------------------------------------
+```
+index=endpoint (sourcetype=sysmon OR source="*Sysmon*") EventCode=1
+  ParentImage IN ("*\\w3wp.exe","*\\tomcat*","*\\httpd.exe")
+  Image IN ("*\\cmd.exe","*\\powershell.exe","*\\pwsh.exe","*\\certutil.exe","*\\net.exe","*\\whoami.exe")
+| table _time host User ParentImage Image CommandLine
+| sort - _time
+
+```
+------------------------------------------------------------------------------
+ 6. KNOWN C2 / HASHES (RETRO-HUNT)  <-- ADD VERIFIED HASHES
+    Populate 'apt41_hashes.csv' (column: file_hash) from Mandiant/Talos/Tinexta
+    appendices (DUSTTRAP, DUSTPAN, KEYPLUG, ShadowPad).
+------------------------------------------------------------------------------
+```
+index=endpoint (sourcetype=sysmon OR source="*Sysmon*") (EventCode=1 OR EventCode=7)
+| eval file_hash=lower(coalesce(SHA256, Hashes, ImageLoaded_hash))
+| search [ | inputlookup apt41_hashes.csv | eval file_hash=lower(file_hash) | fields file_hash ]
+| table _time host User Image ImageLoaded CommandLine file_hash
+
+```
+ NOTES
+ - 1, 2, 5 are the highest fidelity. 3, 4 need free-hosting/Google-API context.
+ - DUSTTRAP keys its decryption to HKLM\SOFTWARE\Microsoft\Cryptography\
+   MachineGUID, so payloads are per-host and won't match across victims —
+   another reason to lead with behavior, not file hashes.
+==============================================================================
+```
