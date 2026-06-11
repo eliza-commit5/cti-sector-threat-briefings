@@ -38,16 +38,21 @@ DeviceNetworkEvents
 | where isnotempty(RemoteUrl)
 | extend host = tostring(RemoteUrl)
 | extend labels = split(host, ".")
-| extend longestLabel = toint(arraymax(extract_all(@"([^.]+)", host)
-        | extend l = strlen(tostring(1))))  // see note: simplify if needed
-| extend parent = strcat(tostring(labels[array_length(labels)-2]), ".", tostring(labels[array_length(labels)-1]))
-| where strlen(host) > 60
-| summarize Count = count(), Unique = dcount(host),
-            FirstSeen = min(Timestamp), LastSeen = max(Timestamp) by DeviceName, parent
-| where Unique > 50
-| sort by Unique desc
-// NOTE: the arraymax/strlen line is environment-finicky; the durable filter is
-// strlen(host) > 60 plus a high count of unique subdomains under one parent.
+| where array_length(labels) >= 3
+| extend parent = strcat(
+    tostring(labels[array_length(labels)-2]),
+    ".",
+    tostring(labels[array_length(labels)-1])
+)
+| summarize
+    Queries=count(),
+    UniqueSubdomains=dcount(host),
+    AvgLength=avg(strlen(host)),
+    MaxLength=max(strlen(host))
+    by DeviceName, parent
+| where UniqueSubdomains > 100
+    and AvgLength > 40
+| order by UniqueSubdomains desc
 
 
 // -----------------------------------------------------------------------------
